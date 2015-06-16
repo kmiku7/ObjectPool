@@ -5,8 +5,9 @@ import "time"
 type objectHolder struct {
 	object      interface{}
 	createTime  time.Time
-	useCount    uint64
 	lastUseTime time.Time
+	useCount    uint64
+	usable      bool
 }
 
 func (o objectHolder) ExtractObject() interface{} {
@@ -19,4 +20,12 @@ func (o objectHolder) GetCreateTime() time.Time {
 
 func (o objectHolder) GetUseCount() uint64 {
 	return o.useCount
+}
+
+func (o objectHolder) IsUsable() bool {
+	return o.usable
+}
+
+func (o *objectHolder) MarkUnusable() {
+	o.usable = false
 }

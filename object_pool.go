@@ -8,7 +8,7 @@ import (
 
 type Constructor func() (interface{}, error)
 type Destructor func(interface{})
-type IdExtractor(interface{}) string
+type IdExtractor func(interface{}) string
 
 var {
 	ErrIsClosed = error.New("object pool is closed")
@@ -34,11 +34,11 @@ type objectPool struct {
 }
 
 func NewObjectPool(
-		max_object 	uint64, 
-		min_object 	uint64, 
-		idle_time 	time.Duration, 
-		constructor Constructor, 
-		destructor 	Destructor, 
+		min_object 	uint64,
+		max_object 	uint64,
+		idle_time 	time.Duration,
+		constructor Constructor,
+		destructor 	Destructor,
 		idExtractor IdExtractor
 	) (*objectPool, error) {
 
@@ -69,7 +69,7 @@ func NewObjectPool(
 	}
 
 	decreaseStep := max_object != 0 ? max_object - min_object : 0
-	decreaseStep = decreaseStep / 20 
+	decreaseStep = decreaseStep / 20
 	decreaseStep = decreaseStep > 10 ? decreaseStep : 10
 
 	pool.decreaseStep = decreaseStep
@@ -91,6 +91,7 @@ func (p *objectPool) GetObject() (*objectHolder, error) {
 		return nil, ErrIsClosed
 	}
 
+	p.closed = true
 	objectIdle := len(p.idlePool)
 	if objectIdle > 0 {
 		object := p.idlePool[objectIdle-1]
@@ -110,6 +111,7 @@ func (p *objectPool) GetObject() (*objectHolder, error) {
 	object = &objectHolder{}
 	activePool[object] = true
 	object.useCount = 0
+	object.usable = true
 	object.createTime = object.lastUseTime = time.Now()
 
 	p.mutex.Unlock()
@@ -127,7 +129,7 @@ func (p *objectPool) GetObject() (*objectHolder, error) {
 	return object, nil
 }
 
-func (p *objectPool) ReturnObject(object *objectHolder, destruct bool) error {
+func (p *objectPool) ReturnObject(object *objectHolder) error {
 	p.mutex.Lock()
 
 	if p.closed {
@@ -137,22 +139,30 @@ func (p *objectPool) ReturnObject(object *objectHolder, destruct bool) error {
 
 	delete(p.activePool, objectHolder)
 
-	decreaseCount := len(p.idlePool) < p.decreaseStep ? len(p.idlePool) : p.decreaseStep
-	CASUAL:
-	for count := 0; count < p.decreaseStep; ++count {
-		if p.idlePool[count].lastUseTime.Add(p.idleTime).After(time.Now()) {
-			break CASUAL
-		}
-		select {
-		case p.destructQueue <- p.idlePool[count]:
-		case default:
-			break CASUAL
-		}
-	}
-	copy(p.idlePool, p.idlePool[count:])
-	p.idlePool := p.idlePool[:len(idlePool)-count]
+	allCount := len(p.idlePool) + len(p.activePool)
 
-	if !destruct {
+	if allCount > p.minObjectCount {
+		decreaseCount := allCount - p.minObjectCount
+		decreaseCount := p.decreaseStep	< decreaseCount ? p.decreaseStep : decreaseCount
+		decreaseCount := len(p.idlePool) < p.decreaseStep ? len(p.idlePool) : p.decreaseStep
+		CASUAL:
+		for count := 0; count < p.decreaseStep; ++count {
+			if p.idlePool[count].lastUseTime.Add(p.idleTime).After(time.Now()) {
+				break CASUAL
+			}
+			select {
+			case p.destructQueue <- p.idlePool[count]:
+			case default:
+				break CASUAL
+			}
+		}
+		copy(p.idlePool, p.idlePool[count:])
+		p.idlePool := p.idlePool[:len(idlePool)-count]
+		allCount = len(p.idlePool) + len(p.activePool)
+	}
+
+
+	if object.IsUsable() {
 		p.idlePool = append(p.idlePool, objectHolder)
 		p.mutex.Unlock()
 	} else {

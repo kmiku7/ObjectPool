@@ -29,3 +29,4 @@ func (o objectHolder) IsUsable() bool {
 func (o *objectHolder) MarkUnusable() {
 	o.usable = false
 }
+

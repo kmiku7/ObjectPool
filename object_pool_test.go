@@ -1,5 +1,13 @@
 package ObjectPool
 
+import (
+	"io"
+	"sync"
+	"sync/Atomic"
+	"net"
+	"testing"
+)
+
 var (
 	uint_1024 = 1024
 	uint_2048 = 2048
@@ -124,8 +132,8 @@ func TestNew_OK(t *testing.T) {
 func TestGet_OK(t *testing.T) {
 	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
 					conn_constructor, conn_destructor, conn_id_extractor)
-	if err == nil {
-		t.Fatalf("New() should checking idExtractor is not nil")
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
 	}
 	defer pool.Close()
 
@@ -158,8 +166,8 @@ func TestGet_OK(t *testing.T) {
 func TestGet_FAIL(t *testing.T) {
 	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
 					conn_down_constructor, conn_destructor, conn_id_extractor)
-	if err == nil {
-		t.Fatalf("New() should checking idExtractor is not nil")
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
 	}
 	defer pool.Close()
 
@@ -181,8 +189,8 @@ func TestGet_FAIL(t *testing.T) {
 func TestReadWrite_OK(t *testing.T) {
 	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
 					conn_constructor, conn_destructor, conn_id_extractor)
-	if err == nil {
-		t.Fatalf("New() should checking idExtractor is not nil")
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
 	}
 	defer pool.Close()
 
@@ -215,8 +223,152 @@ func TestReadWrite_OK(t *testing.T) {
 	pool.RetunOjbect(object_holder)
 }
 
-func TestIsClosed_OK(t *testing.T) {
+func TestReturn_OK(t *testing.T) {
 	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+	defer pool.Close()
+
+	object_holder, err := pool.GetOjbect()
+	if err != nil {
+		assert_is_nil(object_holder)
+		t.Fatalf("GetObject() failed, err:%s", err)
+	}
+
+	err := pool.RetunOjbect(object_holder)
+	if err != nil {
+		t.Fatalf("Return Object failed, err:%v", err)
+	}
+
+	if pool.GetIdleObjectCount() != 1 {
+		t.Fatalf("Return Object Failed, expect:%d, get:%d", 1, pool.GetIdleObjectCount())
+	}
+}
+
+func TestReturn_ReturnUnusable(t *tesing.T) {
+	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+	defer pool.Close()
+
+	object_holder, err := pool.GetOjbect()
+	if err != nil {
+		assert_is_nil(object_holder)
+		t.Fatalf("GetObject() failed, err:%s", err)
+	}
+
+	object_holder.MarkUnusable()
+	err := pool.RetunOjbect(object_holder)
+	if err != nil {
+		t.Fatalf("Return Object failed, err:%v", err)
+	}
+
+	if pool.GetIdleObjectCount() != 0 {
+		t.Fatalf("Return Object Failed, expect:%d, get:%d", 0, pool.GetIdleObjectCount())
+	}
+}
+
+func TestReturn_NotBelongToPool(t *testing.T) {
+	pool, err := NewObjectPool(uint_512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+	defer pool.Close()
+
+	object_holder := &objectHOlder {
+		object: nil,
+		createTime: time.Now(),
+		lastUseTime: time.Now(),
+		useCount: 0,
+		usable: true,
+	}
+
+	err := pool.ReturnObject(object_holder)
+	if err == nil {
+		t.Fatalf("Cannot return object that does not belong to this pool")
+	}
+
+	if pool.GetObjectCount() != 0 {
+		t.Fatalf("ObjectCount should be ZERO, get:%d", pool.GetObjectCount())
+	}
+}
+
+func TestUseCount(t *testing.T) {
+	pool, err := NewObjectPool(uint_512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+	defer pool.Close()
+
+	object_holder, err := pool.GetObject()
+	fatal_is_nil(t, err)
+	if object_holder.GetUseCount() != 1 {
+		t.Fatalf("Invalid UseCount, expect:%d, get:%d", 1, object_holder.GetUseCount())
+	}
+
+	err = pool.ReturnObject(object_holder)
+	fatal_is_nil(t, err)
+	object_holder, err = pool.GetObject()
+	fatal_is_nil(t, err)
+	if object_holder.GetUseCount() != 2 {
+		t.Fatalf("Invalid UseCount, expect:%d, get:%d", 2, object_holder.GetUseCount())
+	}
+
+	err = pool.ReturnObject(object_holder)
+	fatal_is_nil(t, err)
+	object_holder, err = pool.GetObject()
+	fatal_is_nil(t, err)
+	if object_holder.GetUseCount() != 3 {
+		t.Fatalf("Invalid UseCount, expect:%d, get:%d", 3, object_holder.GetUseCount())
+	}
+
+	err = pool.ReturnObject(object_holder)
+	fatal_is_nil(t, err)
+}
+
+
+// Start multi goroutines, every routine first GetObject() & Write & Read & ReturnObject()
+// then sleep some time rand between [0ms, 10ms] and repeat the operation before.
+func TestCurrency(t *testing.T) {
+	pool, err := NewObjectPool(uint_512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+
+
+	concurrency_count := 1000
+	for idx := 0; idx < concurrency_count; ++idx {
+		go func(idx int) {
+
+
+		} (idx)
+	}
+
+
+
+
+	
+}
+
+
+func TestItemIdle(t *testing.T) {
+	pool, err := NewObjectPool(uint_512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err != nil {
+		t.Fatalf("New() create object failed, err:%v", err)
+	}
+}
+
+
+func TestIsClosed_OK(t *testing.T) {
+	pool, err := NewObjectPool(uint_512, uint_1024, idle_300s,
 					conn_constructor, conn_destructor, conn_id_extractor)
 	if err == nil {
 		t.Fatalf("New() should checking idExtractor is not nil")
@@ -268,19 +420,35 @@ func TestGetObjectCount(t *testing.T) {
 	for object_holder := range object_active {
 		pool.RetunOjbect(object_holder)
 	}
+
+	if pool.GetIdleObjectCount() != object_idle_count + object_active_count {
+		t.Fatalf("idle object count invalid, expect:%d, get:%d", object_idle_count + object_active_count, pool.GetIdleObjectCount())
+	}
 }
 
+// Test GetMaxObjectCount() & GetMinObjectCount() & GetIdleTime()
 func TestGetMaxObjectCount(t *testing.T) {
+	pool, err := NewObjectPool(uint512, uint_1024, idle_300s,
+					conn_constructor, conn_destructor, conn_id_extractor)
+	if err == nil {
+		t.Fatalf("New() should checking idExtractor is not nil")
+	}
+	defer pool.Close()
 
+	if pool.TestGetMaxObjectCount() != uint_1024 {
+		t.Errorf("GetMaxObjectCount() return invalid value, expect:%d, get:%d", uint_1024, pool.GetMaxObjectCount())
+	}
+
+	if pool.GetMinObjectCount() != uint_512 {
+		t.Errorf("GetMinObjectCount() return invalid value, expect:%d, get:%d", uint_512, pool.GetMinObjectCount())
+	}
+
+	if pool.GetIdleTime().Nanoseconds() != idle_300s.Nanoseconds() {
+		t.Errorf("GetIdleTime() return invalid value, expect:%s, get:%s", idle_300s, pool.GetIdleTime())
+	}
 }
 
-func TestGetMinObjectCount(t *testing.T) {
 
-}
-
-func TestGetIdleTime(t *testing.T) {
-
-}
 
 func fatal_is_nil(t *testing.T, object interface{}) {
 	if object != nil {
